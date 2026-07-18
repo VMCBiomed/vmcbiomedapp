@@ -1,0 +1,25 @@
+{
+  "name": "VMC Biomedical PM & Calibration",
+  "short_name": "VMC Biomed",
+  "description": "Preventive maintenance and calibration tracking for VMC Biomedical Engineering Section",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0F2535",
+  "theme_color": "#0F2535",
+  "icons": [
+    {
+      "src": "https://lh3.googleusercontent.com/d/1MZ5Ox1X0VJegn0tnkV5roNNgoHxWDfuh",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any"
+    },
+    {
+      "src": "https://lh3.googleusercontent.com/d/1MZ5Ox1X0VJegn0tnkV5roNNgoHxWDfuh",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any"
+    }
+  ]
+}
