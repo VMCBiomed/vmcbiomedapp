@@ -105,6 +105,7 @@ function startCamera(){
         document.getElementById('flipBtn').style.display = cams.length > 1 ? '' : 'none';
       });
       scanLoop();
+      _startScanDiagnostic();
     })
     .catch(function(err){
       setStatus('⚠ Camera unavailable (' + (err.name||'Error') + '): ' + err.message + '. Use "Upload QR Image" below instead.', 'err');
@@ -116,6 +117,9 @@ function flipCamera(){
   startCamera();
 }
 
+var _scanFrameCount = 0;
+var _scanDiagInterval = null;
+
 function scanLoop(){
   var video = document.getElementById('video');
   var canvas = document.getElementById('canvas');
@@ -126,12 +130,34 @@ function scanLoop(){
     ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
     var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
     var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+    _scanFrameCount++;
     if (code){
       handleResult(code.data);
       return;
     }
   }
   _animFrame = requestAnimationFrame(scanLoop);
+}
+
+// Live diagnostic — shows actual video/canvas dimensions and how many
+// frames have been processed, updated twice a second while scanning.
+// Helps distinguish between "the loop isn't running at all" (frame
+// count stuck at 0), "the video feed has no real dimensions"
+// (0x0 or NaN), vs "frames ARE being processed but jsQR genuinely
+// isn't finding a code in them" (count climbing steadily, dimensions
+// look normal) — each of those needs a different fix, and this makes
+// which one is actually happening visible instead of guessing.
+function _startScanDiagnostic(){
+  if (_scanDiagInterval) clearInterval(_scanDiagInterval);
+  _scanDiagInterval = setInterval(function(){
+    var video = document.getElementById('video');
+    var statusEl = document.getElementById('statusBar');
+    if (statusEl.className === 'ok' || statusEl.className === 'err') return; // don't override a real result/error
+    statusEl.textContent = 'Scanning… (frames: ' + _scanFrameCount + ', video: ' + video.videoWidth + 'x' + video.videoHeight + ', ready: ' + video.readyState + ')';
+  }, 500);
+}
+function _stopScanDiagnostic(){
+  if (_scanDiagInterval){ clearInterval(_scanDiagInterval); _scanDiagInterval = null; }
 }
 
 function scanFromFile(input){
@@ -184,6 +210,7 @@ function stopStream(){
   if (_stream){ _stream.getTracks().forEach(function(t){ t.stop(); }); _stream = null; }
   var video = document.getElementById('video');
   if (video) video.srcObject = null;
+  _stopScanDiagnostic();
 }
 
 function closeScanner(){
