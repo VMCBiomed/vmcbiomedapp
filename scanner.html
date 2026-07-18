@@ -123,18 +123,35 @@ var _scanDiagInterval = null;
 function scanLoop(){
   var video = document.getElementById('video');
   var canvas = document.getElementById('canvas');
-  if (video.readyState === video.HAVE_ENOUGH_DATA){
-    canvas.width = video.videoWidth;
-    canvas.height = video.videoHeight;
-    var ctx = canvas.getContext('2d');
-    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-    var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-    var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
-    _scanFrameCount++;
-    if (code){
-      handleResult(code.data);
-      return;
+  try{
+    if (video.readyState === video.HAVE_ENOUGH_DATA){
+      canvas.width = video.videoWidth;
+      canvas.height = video.videoHeight;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+      _scanFrameCount++;
+      if (code){
+        handleResult(code.data);
+        return;
+      }
     }
+  } catch(loopErr){
+    // The loop was previously dying silently on any thrown error here
+    // (e.g. a canvas SecurityError, or jsQR itself throwing on a
+    // malformed frame) — requestAnimationFrame would simply never get
+    // called again, and _scanFrameCount would freeze at whatever it
+    // last was, all while the diagnostic (a separate setInterval)
+    // kept reporting the video's own state as perfectly healthy,
+    // making it look like frames were just never being processed at
+    // all instead of the loop having crashed once and stopped.
+    // Surfacing this directly instead of swallowing it.
+    var statusEl = document.getElementById('statusBar');
+    statusEl.textContent = '⚠ Scan loop error: ' + (loopErr.name||'') + ' ' + loopErr.message;
+    statusEl.className = 'err';
+    _stopScanDiagnostic();
+    return; // don't reschedule — a crash loop would just spam this error every frame
   }
   _animFrame = requestAnimationFrame(scanLoop);
 }
@@ -215,8 +232,17 @@ function stopStream(){
 
 function closeScanner(){
   stopStream();
-  if (window.opener && !window.opener.closed) window.close();
-  else setStatus('You can close this tab now.');
+  // Always attempt window.close() rather than gating it strictly on
+  // window.opener being set — a same-origin popup opened via
+  // window.open() can still be closable even if opener detection is
+  // unreliable in some mobile browser contexts. window.close() is a
+  // harmless no-op if the browser doesn't permit it (it won't throw),
+  // so this is safe to just try either way; the fallback message only
+  // shows if the tab is still visibly open a moment later.
+  window.close();
+  setTimeout(function(){
+    setStatus('You can close this tab now.');
+  }, 300);
 }
 
 window.addEventListener('beforeunload', stopStream);
