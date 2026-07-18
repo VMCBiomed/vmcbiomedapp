@@ -81,7 +81,6 @@
 // validates the message shape itself before acting on it, which is the
 // actual security boundary rather than postMessage's targetOrigin.
 var _stream = null;
-var _animFrame = null;
 var _facingMode = 'environment';
 
 function setStatus(text, cls){
@@ -104,7 +103,7 @@ function startCamera(){
         var cams = devices.filter(function(d){ return d.kind === 'videoinput'; });
         document.getElementById('flipBtn').style.display = cams.length > 1 ? '' : 'none';
       });
-      scanLoop();
+      _startScanLoop();
       _startScanDiagnostic();
     })
     .catch(function(err){
@@ -140,20 +139,44 @@ function scanLoop(){
   } catch(loopErr){
     // The loop was previously dying silently on any thrown error here
     // (e.g. a canvas SecurityError, or jsQR itself throwing on a
-    // malformed frame) — requestAnimationFrame would simply never get
-    // called again, and _scanFrameCount would freeze at whatever it
-    // last was, all while the diagnostic (a separate setInterval)
-    // kept reporting the video's own state as perfectly healthy,
-    // making it look like frames were just never being processed at
-    // all instead of the loop having crashed once and stopped.
-    // Surfacing this directly instead of swallowing it.
+    // malformed frame) — the schedule would simply never continue, all
+    // while the diagnostic (a separate setInterval) kept reporting the
+    // video's own state as perfectly healthy, making it look like
+    // frames were just never being processed at all instead of the
+    // loop having crashed once and stopped. Surfacing this directly
+    // instead of swallowing it.
     var statusEl = document.getElementById('statusBar');
     statusEl.textContent = '⚠ Scan loop error: ' + (loopErr.name||'') + ' ' + loopErr.message;
     statusEl.className = 'err';
-    _stopScanDiagnostic();
-    return; // don't reschedule — a crash loop would just spam this error every frame
+    _stopScanLoop();
+    return;
   }
-  _animFrame = requestAnimationFrame(scanLoop);
+}
+
+// scanLoop is scheduled via setInterval rather than
+// requestAnimationFrame. requestAnimationFrame callbacks are
+// deliberately throttled or entirely paused by the browser whenever
+// the tab/window isn't the visible, focused, foreground one — and a
+// popup window opened via window.open() is not guaranteed to reliably
+// hold focus on every mobile browser/OS combination, especially right
+// after just changing how that popup opens. That mismatch produces
+// exactly this symptom: the video feed itself stays genuinely healthy
+// (confirmed by the diagnostic, which uses setInterval and so keeps
+// running regardless), while the scan loop's requestAnimationFrame
+// callback simply never gets invoked again after the first call,
+// silently, with no error — frame count frozen at 0 forever.
+// setInterval keeps running on a real wall-clock timer regardless of
+// focus/visibility state (browsers only ever throttle its minimum
+// interval in a backgrounded tab, they don't stop it outright), so
+// this sidesteps the whole class of problem. ~15 scans/sec is more
+// than enough for QR detection.
+var _scanIntervalId = null;
+function _startScanLoop(){
+  _stopScanLoop();
+  _scanIntervalId = setInterval(scanLoop, 66);
+}
+function _stopScanLoop(){
+  if (_scanIntervalId){ clearInterval(_scanIntervalId); _scanIntervalId = null; }
 }
 
 // Live diagnostic — shows actual video/canvas dimensions and how many
@@ -223,7 +246,7 @@ function handleResult(text){
 }
 
 function stopStream(){
-  if (_animFrame){ cancelAnimationFrame(_animFrame); _animFrame = null; }
+  _stopScanLoop();
   if (_stream){ _stream.getTracks().forEach(function(t){ t.stop(); }); _stream = null; }
   var video = document.getElementById('video');
   if (video) video.srcObject = null;
