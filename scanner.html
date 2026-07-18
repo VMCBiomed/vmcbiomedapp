@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>VMC Biomedical — Scan QR</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+
+<!-- ═══════════════════════════════════════════════════════════
+     STANDALONE CAMERA SCANNER — exists because Google Apps Script
+     itself blocks navigator.mediaDevices.getUserMedia() for every
+     page it serves, via its own Permissions-Policy: camera header.
+     This is documented directly by Google:
+       https://developers.google.com/apps-script/guides/support/troubleshooting
+       ("Host the functionality that requires these permissions on a
+        separate domain (outside of Apps Script) and open it in a new
+        window or tab.")
+     This page runs on GitHub Pages (a separate, non-Apps-Script
+     domain), where getUserMedia works completely normally — camera
+     restriction is Apps-Script-specific, not something inherent to
+     iframes or embedding in general. It scans a QR code client-side
+     using jsQR, then posts the decoded text back to the Apps Script
+     app via window.opener.postMessage(), which the app listens for
+     (see the scanner-bridge additions in JavaScript.html).
+     ═══════════════════════════════════════════════════════════ -->
+
+<style>
+  html,body{margin:0;padding:0;height:100%;background:#0B1E2E;color:#fff;font-family:system-ui,-apple-system,sans-serif;overflow:hidden;}
+  #wrap{position:fixed;inset:0;display:flex;flex-direction:column;}
+  #camWrap{position:relative;flex:1;background:#000;overflow:hidden;}
+  video{width:100%;height:100%;object-fit:cover;display:block;}
+  canvas{display:none;}
+  #targetBox{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    width:min(70vw,260px);height:min(70vw,260px);
+    border:3px solid rgba(255,255,255,.85);border-radius:16px;
+    box-shadow:0 0 0 9999px rgba(0,0,0,.4);pointer-events:none;
+  }
+  #scanLine{
+    position:absolute;left:calc(50% - min(35vw,130px));width:min(70vw,260px);height:3px;
+    background:linear-gradient(90deg,transparent,#0EA5E9,transparent);border-radius:2px;
+    animation:scanAnim 2s linear infinite;top:calc(50% - min(35vw,130px));
+  }
+  @keyframes scanAnim{0%{top:calc(50% - min(35vw,130px));}50%{top:calc(50% + min(35vw,127px));}100%{top:calc(50% - min(35vw,130px));}}
+  #statusBar{padding:14px 20px calc(14px + env(safe-area-inset-bottom,0px));background:#0F2535;text-align:center;font-size:14px;color:#CBD5E0;min-height:20px;}
+  #statusBar.err{color:#F6AD55;}
+  #statusBar.ok{color:#68D391;}
+  #topBar{position:absolute;top:0;left:0;right:0;padding:calc(12px + env(safe-area-inset-top,0px)) 16px 12px;display:flex;justify-content:space-between;align-items:center;z-index:5;}
+  #topBar button{background:rgba(0,0,0,.5);border:none;color:#fff;font-size:15px;font-weight:600;padding:8px 16px;border-radius:20px;cursor:pointer;}
+  #uploadRow{padding:0 16px 14px;text-align:center;}
+  #uploadRow label{display:inline-block;background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.25);color:#fff;font-size:13px;font-weight:600;padding:8px 18px;border-radius:20px;cursor:pointer;}
+</style>
+</head>
+<body>
+<div id="wrap">
+  <div id="camWrap">
+    <video id="video" playsinline autoplay muted></video>
+    <canvas id="canvas"></canvas>
+    <div id="targetBox"></div>
+    <div id="scanLine"></div>
+    <div id="topBar">
+      <button onclick="closeScanner()">✕ Close</button>
+      <button id="flipBtn" onclick="flipCamera()" style="display:none;">🔄 Flip</button>
+    </div>
+  </div>
+  <div id="uploadRow">
+    <label>📁 Upload QR Image instead
+      <input type="file" accept="image/*" style="display:none;" onchange="scanFromFile(this)">
+    </label>
+  </div>
+  <div id="statusBar">Starting camera…</div>
+</div>
+
+<script>
+// window.opener is the Apps Script app tab/window that opened this page
+// via window.open() — postMessage back to it once a QR is decoded.
+// targetOrigin is intentionally '*' here because the Apps Script app's
+// actual served origin varies (script.google.com vs
+// script.googleusercontent.com depending on redirect state) and isn't
+// reliably predictable from this side; the receiving end (JavaScript.html)
+// validates the message shape itself before acting on it, which is the
+// actual security boundary rather than postMessage's targetOrigin.
+var _stream = null;
+var _animFrame = null;
+var _facingMode = 'environment';
+
+function setStatus(text, cls){
+  var el = document.getElementById('statusBar');
+  el.textContent = text;
+  el.className = cls || '';
+}
+
+function startCamera(){
+  stopStream();
+  var constraints = { video: { facingMode: _facingMode, width: { ideal: 1280 }, height: { ideal: 720 } } };
+  navigator.mediaDevices.getUserMedia(constraints)
+    .then(function(stream){
+      _stream = stream;
+      var video = document.getElementById('video');
+      video.srcObject = stream;
+      video.play();
+      setStatus('Scanning…');
+      navigator.mediaDevices.enumerateDevices().then(function(devices){
+        var cams = devices.filter(function(d){ return d.kind === 'videoinput'; });
+        document.getElementById('flipBtn').style.display = cams.length > 1 ? '' : 'none';
+      });
+      scanLoop();
+    })
+    .catch(function(err){
+      setStatus('⚠ Camera unavailable (' + (err.name||'Error') + '): ' + err.message + '. Use "Upload QR Image" below instead.', 'err');
+    });
+}
+
+function flipCamera(){
+  _facingMode = (_facingMode === 'environment') ? 'user' : 'environment';
+  startCamera();
+}
+
+function scanLoop(){
+  var video = document.getElementById('video');
+  var canvas = document.getElementById('canvas');
+  if (video.readyState === video.HAVE_ENOUGH_DATA){
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+    var ctx = canvas.getContext('2d');
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
+    if (code){
+      handleResult(code.data);
+      return;
+    }
+  }
+  _animFrame = requestAnimationFrame(scanLoop);
+}
+
+function scanFromFile(input){
+  var file = input.files[0];
+  if (!file) return;
+  setStatus('Reading image…');
+  var reader = new FileReader();
+  reader.onload = function(e){
+    var img = new Image();
+    img.onload = function(){
+      var canvas = document.getElementById('canvas');
+      canvas.width = img.width; canvas.height = img.height;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+      var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'attemptBoth' });
+      if (code) handleResult(code.data);
+      else { setStatus('❌ No QR code found in image. Try another image.', 'err'); }
+    };
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+  input.value = '';
+}
+
+function handleResult(text){
+  setStatus('✅ QR detected!', 'ok');
+  stopStream();
+  // Post the result back to whichever window opened this page (the
+  // Apps Script app), then close this scanner page automatically —
+  // the app's own message listener (see JavaScript.html) takes it from
+  // here exactly like it already handles a scan from the in-app
+  // camera loop or an uploaded image.
+  try{
+    if (window.opener && !window.opener.closed){
+      window.opener.postMessage({ source: 'vmc-external-scanner', qrText: text }, '*');
+      setTimeout(function(){ window.close(); }, 350);
+    } else {
+      // Opened directly (not as a popup) — nothing to post back to,
+      // so just show the raw result as a fallback.
+      setStatus('QR content: ' + text, 'ok');
+    }
+  } catch(e){
+    setStatus('QR content: ' + text, 'ok');
+  }
+}
+
+function stopStream(){
+  if (_animFrame){ cancelAnimationFrame(_animFrame); _animFrame = null; }
+  if (_stream){ _stream.getTracks().forEach(function(t){ t.stop(); }); _stream = null; }
+  var video = document.getElementById('video');
+  if (video) video.srcObject = null;
+}
+
+function closeScanner(){
+  stopStream();
+  if (window.opener && !window.opener.closed) window.close();
+  else setStatus('You can close this tab now.');
+}
+
+window.addEventListener('beforeunload', stopStream);
+startCamera();
+</script>
+</body>
+</html>
