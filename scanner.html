@@ -91,7 +91,14 @@ function setStatus(text, cls){
 
 function startCamera(){
   stopStream();
-  var constraints = { video: { facingMode: _facingMode, width: { ideal: 1280 }, height: { ideal: 720 } } };
+  // 720p was heavier than needed for QR reading specifically — running
+  // getImageData + jsQR on a full 1280x720 frame ~15x/second is
+  // genuinely demanding on a mid-range phone and was the main
+  // contributor to general sluggishness. QR codes don't need that much
+  // resolution to decode reliably; 640x480 is still comfortably enough
+  // detail while being roughly a third of the pixels to process per
+  // frame, which should noticeably reduce lag on weaker devices.
+  var constraints = { video: { facingMode: _facingMode, width: { ideal: 640 }, height: { ideal: 480 } } };
   navigator.mediaDevices.getUserMedia(constraints)
     .then(function(stream){
       _stream = stream;
@@ -132,6 +139,21 @@ function scanLoop(){
       var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
       _scanFrameCount++;
       if (code){
+        // Stop the interval FIRST, synchronously, before anything else
+        // runs. setInterval does not pause itself just because its own
+        // callback is still executing — if handleResult/stopStream/the
+        // postMessage handshake took any time at all (or if
+        // window.close() silently failed to actually close the popup,
+        // which is a known possibility on some mobile browsers), the
+        // interval kept firing every 66ms underneath, re-entering
+        // scanLoop and competing with the in-progress teardown for the
+        // same video/canvas/stream resources. That's what produced the
+        // "freezes and stays there, laggy" symptom — not a single
+        // hang, but a background pile-up of overlapping scan attempts
+        // after detection, still running invisibly on top of a screen
+        // that LOOKED frozen because the visible video feed had
+        // already stopped updating.
+        _stopScanLoop();
         handleResult(code.data);
         return;
       }
@@ -224,17 +246,28 @@ function scanFromFile(input){
 }
 
 function handleResult(text){
-  setStatus('✅ QR detected!', 'ok');
+  setStatus('✅ QR detected — sending to app…', 'ok');
   stopStream();
-  // Post the result back to whichever window opened this page (the
-  // Apps Script app), then close this scanner page automatically —
-  // the app's own message listener (see JavaScript.html) takes it from
-  // here exactly like it already handles a scan from the in-app
-  // camera loop or an uploaded image.
+  // Stop the animated scan-line immediately on detection — it was
+  // previously left running for the full 350ms delay before close,
+  // which combined with the now-frozen last video frame underneath it
+  // is what likely reads as "laggy/frozen" rather than a real hang:
+  // the scan-line keeps sliding over a static image instead of live
+  // video, which looks broken even though detection already succeeded.
+  var scanLineEl = document.getElementById('scanLine');
+  if (scanLineEl) scanLineEl.style.display = 'none';
+
   try{
     if (window.opener && !window.opener.closed){
       window.opener.postMessage({ source: 'vmc-external-scanner', qrText: text }, '*');
-      setTimeout(function(){ window.close(); }, 350);
+      setStatus('✅ Sent — closing…', 'ok');
+      // Close immediately rather than waiting 350ms — postMessage is
+      // synchronous from the sender's perspective (delivery to the
+      // other window's message queue happens right away), so there's
+      // no real reason to delay window.close() and every extra
+      // millisecond here reads as the page "hanging" after a
+      // successful scan.
+      window.close();
     } else {
       // Opened directly (not as a popup) — nothing to post back to,
       // so just show the raw result as a fallback.
