@@ -4,7 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <title>VMC Biomedical — Scan QR</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js"></script>
 
 <!-- ═══════════════════════════════════════════════════════════
      STANDALONE CAMERA SCANNER — exists because Google Apps Script
@@ -269,7 +269,30 @@ function closeScanner(){
 }
 
 window.addEventListener('beforeunload', stopStream);
-startCamera();
+
+// jsQR is loaded from a CDN <script> tag in <head> — normally that
+// blocks page execution until it's fully loaded and defines the
+// global jsQR function, but a slow/flaky mobile connection, an ad
+// blocker, or a privacy browser that blocks cdnjs.cloudflare.com
+// specifically can leave it undefined even with correct tag order.
+// Checking here means the failure surfaces clearly as "the QR library
+// didn't load" with a retry button, rather than only being caught
+// deep inside the scan loop's own try/catch as a generic
+// ReferenceError once scanning had already silently started.
+function _initScannerPage(){
+  if (typeof jsQR !== 'function'){
+    setStatus('⚠ QR scanning library failed to load — check your connection and retry.', 'err');
+    var retryBtn = document.createElement('button');
+    retryBtn.textContent = '🔄 Retry';
+    retryBtn.style.cssText = 'margin-top:8px;background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);color:#fff;font-size:13px;font-weight:600;padding:8px 18px;border-radius:20px;cursor:pointer;';
+    retryBtn.onclick = function(){ retryBtn.remove(); window.location.reload(); };
+    document.getElementById('statusBar').appendChild(document.createElement('br'));
+    document.getElementById('statusBar').appendChild(retryBtn);
+    return;
+  }
+  startCamera();
+}
+_initScannerPage();
 </script>
 </body>
 </html>
