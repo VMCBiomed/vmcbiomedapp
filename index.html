@@ -31,7 +31,7 @@
     top:0; left:0;
     width:100%;
     height:100%;
-    height:100dvh; /* accounts for mobile browser UI / notches correctly */
+    height:100dvh; /* fallback for the very first paint, before JS sizing kicks in below */
     border:none;
     display:block;
   }
@@ -80,6 +80,42 @@
   function hideSplash(){ splash.classList.add('hide'); }
   frame.addEventListener('load', function(){ setTimeout(hideSplash, 400); });
   setTimeout(hideSplash, 4000); // fallback safety net
+
+  // ─── Fix for the app's bottom bar rendering "sunk" on cold-start ───
+  // On a fresh launch of the installed PWA (not a normal browser tab),
+  // Android hasn't finished settling its own chrome — status bar,
+  // gesture nav bar — before the very first layout pass happens. The
+  // CSS 100dvh unit on #appFrame can lock in a value measured DURING
+  // that settling animation, i.e. momentarily taller than the true
+  // final viewport. Since #appFrame's real height then doesn't match
+  // the visible screen, the app running inside it (which sizes its own
+  // fixed bottom bar off ITS OWN window dimensions) computes a
+  // bottom-bar position based on a too-tall iframe viewport, rendering
+  // the bar below what's actually visible — this is why it self-
+  // corrected the instant anything forced a real resize (like opening
+  // the scanner popup, which blurs/refocuses the window).
+  //
+  // Fix: set #appFrame's height explicitly from window.innerHeight
+  // (the wrapper page's own real, already-settled viewport height —
+  // this outer page is a normal top-level page, not inside anything
+  // else, so its own innerHeight is reliable from the start) instead
+  // of trusting the iframe's internal dvh calculation. Re-applied
+  // after a short delay to catch any late chrome-settling, and on
+  // every resize/orientation change afterward. Setting the iframe's
+  // OWN height also causes the iframe's content window to receive a
+  // real 'resize' event, which is what the app's own
+  // _updateMobileBottomBarVisibility() listens for — so this fixes
+  // the root cause rather than requiring the scanner-popup workaround.
+  function _sizeAppFrame(){
+    frame.style.height = window.innerHeight + 'px';
+  }
+  _sizeAppFrame();
+  setTimeout(_sizeAppFrame, 300);  // catch late Android chrome-settling
+  setTimeout(_sizeAppFrame, 1000); // extra safety net for slower devices
+  window.addEventListener('resize', _sizeAppFrame);
+  window.addEventListener('orientationchange', function(){
+    setTimeout(_sizeAppFrame, 300); // orientation change needs a beat to settle too
+  });
 </script>
 
 </body>
