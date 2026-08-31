@@ -91,14 +91,19 @@ function setStatus(text, cls){
 
 function startCamera(){
   stopStream();
-  // 720p was heavier than needed for QR reading specifically — running
-  // getImageData + jsQR on a full 1280x720 frame ~15x/second is
-  // genuinely demanding on a mid-range phone and was the main
-  // contributor to general sluggishness. QR codes don't need that much
-  // resolution to decode reliably; 640x480 is still comfortably enough
-  // detail while being roughly a third of the pixels to process per
-  // frame, which should noticeably reduce lag on weaker devices.
-  var constraints = { video: { facingMode: _facingMode, width: { ideal: 640 }, height: { ideal: 480 } } };
+  // Bumped back up from 640x480 to 1280x720 "ideal". Small stickers
+  // (e.g. ~50x20mm) need real optical/source detail to decode at all —
+  // the native camera app on this same device can only read this
+  // sticker while zoomed in, which means at low resolution the QR's
+  // modules are only a few pixels wide and jsQR simply doesn't have
+  // enough data to work with, regardless of how fast the loop runs.
+  // Since scanLoop() now crops to just the on-screen target box before
+  // running jsQR (see below), we're no longer paying to process the
+  // full frame every tick — only the cropped region — so raising the
+  // source resolution back up doesn't reintroduce the original
+  // per-frame performance cost, it just gives the crop more real detail
+  // to upscale from.
+  var constraints = { video: { facingMode: _facingMode, width: { ideal: 1280 }, height: { ideal: 720 } } };
   navigator.mediaDevices.getUserMedia(constraints)
     .then(function(stream){
       _stream = stream;
@@ -110,6 +115,21 @@ function startCamera(){
         var cams = devices.filter(function(d){ return d.kind === 'videoinput'; });
         document.getElementById('flipBtn').style.display = cams.length > 1 ? '' : 'none';
       });
+      // If the camera track supports native optical/digital zoom
+      // (Android Chrome mostly; iOS Safari generally does not expose
+      // this), nudge it in a bit by default. This is genuine extra
+      // sensor detail rather than software upscaling, so it helps more
+      // than the crop-and-upscale trick alone for a sticker this small.
+      // Wrapped defensively since capabilities() support is inconsistent
+      // across browsers and should never block scanning if unavailable.
+      try {
+        var track = stream.getVideoTracks()[0];
+        var caps = track.getCapabilities ? track.getCapabilities() : null;
+        if (caps && caps.zoom && caps.zoom.max > caps.zoom.min){
+          var desiredZoom = Math.min(caps.zoom.max, Math.max(caps.zoom.min, (caps.zoom.min + caps.zoom.max) * 0.35));
+          track.applyConstraints({ advanced: [{ zoom: desiredZoom }] }).catch(function(){ /* ignore unsupported */ });
+        }
+      } catch(zoomErr){ /* zoom not supported on this device/browser — ignore */ }
       _startScanLoop();
       _startScanDiagnostic();
     })
@@ -126,15 +146,39 @@ function flipCamera(){
 var _scanFrameCount = 0;
 var _scanDiagInterval = null;
 
+// How much of the video frame (centered) to crop before scanning, as a
+// fraction of the shorter video dimension. This is meant to roughly
+// track the visual #targetBox, which is drawn at min(70vw,260px)
+// centered on screen — but the crop is intentionally a bit tighter
+// than the visual box (55% vs ~70%) because the box itself has some
+// margin/whitespace around the actual sticker when a user centers it,
+// and a tighter crop means more of the upscaled canvas is real QR
+// signal rather than background.
+var CROP_FRACTION = 0.55;
+
 function scanLoop(){
   var video = document.getElementById('video');
   var canvas = document.getElementById('canvas');
   try{
-    if (video.readyState === video.HAVE_ENOUGH_DATA){
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
+    if (video.readyState === video.HAVE_ENOUGH_DATA && video.videoWidth > 0){
+      // Crop-and-zoom: instead of feeding jsQR the entire video frame
+      // (which dilutes a small sticker's QR down to a handful of
+      // pixels), crop just the centered region the user is visually
+      // aiming at via #targetBox, then draw that crop into a larger
+      // destination canvas so it gets upscaled. This is software doing
+      // the same thing pinch-zooming the native camera app does —
+      // concentrating all the resolution on the area that matters
+      // instead of spreading it across the whole scene.
+      var shorter = Math.min(video.videoWidth, video.videoHeight);
+      var cropSize = shorter * CROP_FRACTION;
+      var sx = (video.videoWidth - cropSize) / 2;
+      var sy = (video.videoHeight - cropSize) / 2;
+
+      var OUTPUT_SIZE = 640; // upscaled output — bigger than the crop's source pixels
+      canvas.width = OUTPUT_SIZE;
+      canvas.height = OUTPUT_SIZE;
       var ctx = canvas.getContext('2d');
-      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      ctx.drawImage(video, sx, sy, cropSize, cropSize, 0, 0, OUTPUT_SIZE, OUTPUT_SIZE);
       var imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
       var code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: 'dontInvert' });
       _scanFrameCount++;
